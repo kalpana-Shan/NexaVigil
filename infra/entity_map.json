@@ -1,0 +1,7 @@
+{
+  "DKNG": ["draftkings", "sportsbook", "nba", "nfl"],
+  "FLUT": ["fanduel", "flutter", "premier league", "nba"],
+  "MGM": ["mgm", "las vegas", "boxing", "ufc"],
+  "CZR": ["caesars", "sportsbook", "nfl"],
+  "PENN": ["penn", "barstool", "espn bet"]
+}
