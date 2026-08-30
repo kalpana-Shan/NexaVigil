@@ -1,6 +1,9 @@
 from fastapi import FastAPI, Header, HTTPException
 from google.cloud import firestore
-import os, json, logging
+import os
+import json
+import logging
+import sys
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -9,19 +12,56 @@ load_dotenv()
 from agents.supervisor.supervisor import evaluate_pair
 
 app = FastAPI(title="NexaVigil API")
+
+# --- OBSERVABILITY: Structured Logging (Day 12) ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+class FirestoreLogHandler(logging.Handler):
+    """Custom handler that writes logs to Firestore for persistence."""
+    def __init__(self):
+        super().__init__()
+        try:
+            self.db = firestore.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT", "nexavigil"))
+        except Exception as e:
+            self.db = None
+            logging.getLogger("nexavigil").warning(f"Firestore logging disabled: {e}")
+    
+    def emit(self, record):
+        if self.db is None:
+            return
+        try:
+            log_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+                "agent": getattr(record, "agent", "unknown"),
+            }
+            self.db.collection("confluence_logs").add(log_entry)
+        except Exception:
+            pass  # Don't fail if logging fails
+
+logger = logging.getLogger("nexavigil")
+logger.addHandler(FirestoreLogHandler())
+
+# --- Firestore Client ---
 db = firestore.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT", "nexavigil"))
 API_KEY = os.getenv("API_KEY", "dev-key")
-
-logger = logging.getLogger("main")
 
 
 @app.get("/health")
 def health():
+    logger.info("Health check requested")
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/timeline")
 def get_timeline(start: str, end: str, entity: str = None):
+    logger.info(f"Timeline query: start={start}, end={end}, entity={entity}")
     odds = list(db.collection("odds_events").where("timestamp", ">=", start).where("timestamp", "<=", end).stream())
     equity = list(db.collection("equity_signals").where("filing_date", ">=", start).where("filing_date", "<=", end).stream())
     return {
@@ -32,20 +72,24 @@ def get_timeline(start: str, end: str, entity: str = None):
 
 @app.get("/cases")
 def list_cases():
+    logger.info("Listing all cases")
     docs = db.collection("confluence_cases").stream()
     return [{"id": d.id, **d.to_dict()} for d in docs]
 
 
 @app.get("/cases/{case_id}")
 def get_case(case_id: str):
+    logger.info(f"Fetching case: {case_id}")
     doc = db.collection("confluence_cases").document(case_id).get()
     if not doc.exists:
+        logger.warning(f"Case not found: {case_id}")
         raise HTTPException(status_code=404, detail="Case not found")
     return {"id": doc.id, **doc.to_dict()}
 
 
 @app.post("/cases/{case_id}/feedback")
 def post_feedback(case_id: str, payload: dict):
+    logger.info(f"Feedback received for case {case_id}: {payload}")
     from agents.case_memory.case_memory import update_case_feedback
     result = update_case_feedback(case_id, payload.get("feedback"), payload.get("officer_id", "maria"))
     return {"status": "feedback_recorded", "case": result}
@@ -53,6 +97,7 @@ def post_feedback(case_id: str, payload: dict):
 
 @app.get("/registry")
 def get_registry():
+    logger.info("Agent Registry requested")
     docs = db.collection("agent_registry").stream()
     return [{"id": d.id, **d.to_dict()} for d in docs]
 
@@ -60,7 +105,10 @@ def get_registry():
 @app.post("/run-cycle")
 def run_cycle(x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
+        logger.warning("Unauthorized run-cycle attempt")
         raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    logger.info("Pipeline cycle triggered")
     
     # Fetch latest unprocessed odds and equity events
     # In production, this would query Pub/Sub or a queue
@@ -92,7 +140,10 @@ def run_cycle(x_api_key: str = Header(...)):
     
     logger.info(json.dumps({
         "event": "pipeline_cycle_completed",
-        "result": result,
+        "result_status": result.get("status"),
+        "case_id": result.get("case_id"),
+        "convergence_score": result.get("convergence_score"),
+        "skeptic_score": result.get("skeptic_score"),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }))
     
@@ -107,5 +158,6 @@ def run_cycle(x_api_key: str = Header(...)):
 def set_watchlist(payload: dict, x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+    logger.info("BYOF watchlist updated")
     db.collection("byof_watchlists").document("default").set(payload)
     return {"status": "watchlist_updated"}
