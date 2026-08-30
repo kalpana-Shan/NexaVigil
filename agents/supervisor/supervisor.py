@@ -54,11 +54,30 @@ def score_pair_with_retry(odds_event: Dict, equity_signal: Dict, time_diff_hours
     return None
 
 
+
 def compute_time_diff(odds_event: Dict, equity_signal: Dict) -> float:
     """Compute time difference in hours between odds event and equity signal."""
-    from datetime import datetime
-    odds_time = datetime.fromisoformat(odds_event.get("timestamp", "").replace("Z", "+00:00"))
-    equity_time = datetime.fromisoformat(equity_signal.get("filing_date", "").replace("Z", "+00:00"))
+    # Parse odds timestamp (has Z = offset-aware)
+    odds_ts = odds_event.get("timestamp", "")
+    if odds_ts.endswith("Z"):
+        odds_ts = odds_ts.replace("Z", "+00:00")
+    odds_time = datetime.fromisoformat(odds_ts)
+    
+    # Parse equity filing_date (no timezone = assume UTC)
+    equity_date = equity_signal.get("filing_date", "")
+    # If it's just a date (no time), add midnight UTC
+    if "T" not in equity_date:
+        equity_date += "T00:00:00+00:00"
+    elif "+" not in equity_date and "Z" not in equity_date:
+        equity_date += "+00:00"
+    equity_time = datetime.fromisoformat(equity_date)
+    
+    # Ensure both are offset-aware
+    if odds_time.tzinfo is None:
+        odds_time = odds_time.replace(tzinfo=timezone.utc)
+    if equity_time.tzinfo is None:
+        equity_time = equity_time.replace(tzinfo=timezone.utc)
+    
     diff = abs((odds_time - equity_time).total_seconds() / 3600)
     return diff
 
